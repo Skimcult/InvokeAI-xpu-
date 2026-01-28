@@ -50,9 +50,16 @@ class MemorySnapshot:
         if torch.cuda.is_available():
             vram = torch.cuda.memory_allocated()
         else:
-            # TODO: We could add support for mps.current_allocated_memory() as well. Leaving out for now until we have
-            # time to test it properly.
-            vram = None
+            xpu = getattr(torch, "xpu", None)
+            if xpu and xpu.is_available() and hasattr(xpu, "memory_allocated"):
+                try:
+                    vram = xpu.memory_allocated()
+                except Exception:
+                    vram = xpu.memory_allocated(torch.device("xpu"))
+            else:
+                # TODO: We could add support for mps.current_allocated_memory() as well. Leaving out for now until we have
+                # time to test it properly.
+                vram = None
 
         try:
             malloc_info = LibcUtil().mallinfo2()

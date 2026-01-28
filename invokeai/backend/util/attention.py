@@ -22,6 +22,12 @@ def auto_detect_slice_size(latents: torch.Tensor) -> str:
         mem_free = psutil.virtual_memory().free
     elif latents.device.type == "cuda":
         mem_free, _ = torch.cuda.mem_get_info(latents.device)
+    elif latents.device.type == "xpu":
+        xpu = getattr(torch, "xpu", None)
+        if xpu and xpu.is_available() and hasattr(xpu, "mem_get_info"):
+            mem_free, _ = xpu.mem_get_info(latents.device)
+        else:
+            mem_free = psutil.virtual_memory().free
     else:
         raise ValueError(f"unrecognized device {latents.device}")
 

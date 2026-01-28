@@ -35,6 +35,18 @@ GB = 2**30
 MB = 2**20
 
 
+def _is_oom_error(error: Exception) -> bool:
+    if isinstance(error, torch.cuda.OutOfMemoryError):
+        return True
+    torch_oom = getattr(torch, "OutOfMemoryError", None)
+    if torch_oom and isinstance(error, torch_oom):
+        return True
+    xpu = getattr(torch, "xpu", None)
+    if xpu and hasattr(xpu, "OutOfMemoryError") and isinstance(error, xpu.OutOfMemoryError):
+        return True
+    return False
+
+
 # TODO(ryand): Where should this go? The ModelCache shouldn't be concerned with submodels.
 def get_model_cache_key(model_key: str, submodel_type: Optional[SubModelType] = None) -> str:
     """Get the cache key for a model based on the optional submodel type."""
@@ -331,14 +343,14 @@ class ModelCache:
         if isinstance(model, torch.nn.Module):
             apply_custom_layers_to_model(model)
 
-        # Partial loading only makes sense on CUDA.
+        # Partial loading only makes sense on CUDA/XPU.
         # - When running on CPU, there is no 'loading' to do.
         # - When running on MPS, memory is shared with the CPU, so the default OS memory management already handles this
         #   well.
-        running_with_cuda = self._execution_device.type == "cuda"
+        running_with_accelerator = self._execution_device.type in {"cuda", "xpu"}
 
         # Wrap model.
-        if isinstance(model, torch.nn.Module) and running_with_cuda and self._enable_partial_loading:
+        if isinstance(model, torch.nn.Module) and running_with_accelerator and self._enable_partial_loading:
             wrapped_model = CachedModelWithPartialLoad(
                 model, self._execution_device, keep_ram_copy=self._keep_ram_copy_of_weights
             )
@@ -437,11 +449,9 @@ class ModelCache:
             self._logger.debug(
                 f"Finished locking model {cache_entry.key} (Type: {cache_entry.cached_model.model.__class__.__name__})"
             )
-        except torch.cuda.OutOfMemoryError:
-            self._logger.warning("Insufficient GPU memory to load model. Aborting")
-            cache_entry.unlock()
-            raise
-        except Exception:
+        except Exception as e:
+            if _is_oom_error(e):
+                self._logger.warning("Insufficient GPU memory to load model. Aborting")
             cache_entry.unlock()
             raise
 
@@ -534,7 +544,7 @@ class ModelCache:
             else:
                 raise ValueError(f"Unsupported cached model type: {type(cache_entry.cached_model)}")
         except Exception as e:
-            if isinstance(e, torch.cuda.OutOfMemoryError):
+            if _is_oom_error(e):
                 self._logger.warning("Insufficient GPU memory to load model. Aborting")
             # If an exception occurs, the model could be left in a bad state, so we delete it from the cache entirely.
             self._delete_cache_entry(cache_entry)
@@ -575,6 +585,21 @@ class ModelCache:
             vram_allocated = torch.cuda.memory_allocated(self._execution_device)
             vram_free, _vram_total = torch.cuda.mem_get_info(self._execution_device)
             vram_available_to_process = vram_free + vram_allocated
+        elif self._execution_device.type == "xpu":
+            xpu = getattr(torch, "xpu", None)
+            if xpu and xpu.is_available() and hasattr(xpu, "mem_get_info") and hasattr(xpu, "memory_allocated"):
+                try:
+                    vram_allocated = xpu.memory_allocated(self._execution_device)
+                except Exception:
+                    vram_allocated = xpu.memory_allocated()
+                try:
+                    vram_free, _vram_total = xpu.mem_get_info(self._execution_device)
+                except Exception:
+                    vram_free, _vram_total = xpu.mem_get_info()
+                vram_available_to_process = vram_free + vram_allocated
+            else:
+                vram_free = psutil.virtual_memory().available
+                vram_available_to_process = vram_free
         elif self._execution_device.type == "mps":
             vram_reserved = torch.mps.driver_allocated_memory()
             # TODO(ryand): Is it accurate that MPS shares memory with the CPU?
@@ -591,6 +616,14 @@ class ModelCache:
         """Get the amount of VRAM currently in use by the cache."""
         if self._execution_device.type == "cuda":
             return torch.cuda.memory_allocated()
+        elif self._execution_device.type == "xpu":
+            xpu = getattr(torch, "xpu", None)
+            if xpu and xpu.is_available() and hasattr(xpu, "memory_allocated"):
+                try:
+                    return xpu.memory_allocated(self._execution_device)
+                except Exception:
+                    return xpu.memory_allocated()
+            return 0
         elif self._execution_device.type == "mps":
             return torch.mps.current_allocated_memory()
         else:
@@ -613,7 +646,7 @@ class ModelCache:
         #    that most OSes have some amount of disk caching, which we still benefit from if there is excess memory,
         #    even if we drop models from the cache.)
         #    - On systems without a CUDA device, the upper bound is 32GB.
-        #    - On systems with a CUDA device, the upper bound is 1x the amount of VRAM (less the working memory).
+        #    - On systems with a CUDA/XPU device, the upper bound is 1x the amount of VRAM (less the working memory).
         # 3. Absolute minimum of 4GB.
 
         # NOTE(ryand): We explored dynamically adjusting the RAM cache size based on memory pressure (using psutil), but
@@ -625,10 +658,17 @@ class ModelCache:
         #   hard for users to understand. It is better for users to see that their RAM is maxed out, and then override
         #   the default value if desired.
 
-        # Lookup the total VRAM size for the CUDA execution device.
-        total_cuda_vram_bytes: int | None = None
+        # Lookup the total VRAM size for the CUDA/XPU execution device.
+        total_accel_vram_bytes: int | None = None
         if self._execution_device.type == "cuda":
-            _, total_cuda_vram_bytes = torch.cuda.mem_get_info(self._execution_device)
+            _, total_accel_vram_bytes = torch.cuda.mem_get_info(self._execution_device)
+        elif self._execution_device.type == "xpu":
+            xpu = getattr(torch, "xpu", None)
+            if xpu and xpu.is_available() and hasattr(xpu, "mem_get_info"):
+                try:
+                    _, total_accel_vram_bytes = xpu.mem_get_info(self._execution_device)
+                except Exception:
+                    _, total_accel_vram_bytes = xpu.mem_get_info()
 
         # Apply heuristic 1.
         # ------------------
@@ -641,11 +681,11 @@ class ModelCache:
         # Apply heuristic 2.
         # ------------------
         max_ram_cache_size_bytes = 32 * GB
-        if total_cuda_vram_bytes is not None:
+        if total_accel_vram_bytes is not None:
             if self._max_vram_cache_size_gb is not None:
                 max_ram_cache_size_bytes = int(self._max_vram_cache_size_gb * GB)
             else:
-                max_ram_cache_size_bytes = total_cuda_vram_bytes - int(self._execution_device_working_mem_gb * GB)
+                max_ram_cache_size_bytes = total_accel_vram_bytes - int(self._execution_device_working_mem_gb * GB)
         if ram_available_to_model_cache > max_ram_cache_size_bytes:
             heuristics_applied.append(2)
             ram_available_to_model_cache = max_ram_cache_size_bytes
@@ -758,6 +798,13 @@ class ModelCache:
 
         if torch.cuda.is_available():
             log += "  {:<30} {:.1f} MB\n".format("CUDA Memory Allocated:", torch.cuda.memory_allocated() / MB)
+        xpu = getattr(torch, "xpu", None)
+        if xpu and xpu.is_available() and hasattr(xpu, "memory_allocated"):
+            try:
+                xpu_allocated = xpu.memory_allocated()
+            except Exception:
+                xpu_allocated = xpu.memory_allocated(self._execution_device)
+            log += "  {:<30} {:.1f} MB\n".format("XPU Memory Allocated:", xpu_allocated / MB)
         log += "  {:<30} {}\n".format("Total models:", len(self._cached_models))
 
         if include_entry_details and len(self._cached_models) > 0:
