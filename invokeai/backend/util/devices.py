@@ -1,4 +1,4 @@
-from typing import Dict, Literal, Optional, Union
+from typing import Any, Dict, Literal, Optional, Union
 
 import torch
 from deprecated import deprecated
@@ -47,6 +47,19 @@ class TorchDevice:
     MPS_DEVICE = torch.device("mps")
 
     @classmethod
+    def _get_xpu_module(cls) -> Optional[Any]:
+        return getattr(torch, "xpu", None)
+
+    @classmethod
+    def is_xpu_available(cls) -> bool:
+        xpu = cls._get_xpu_module()
+        return bool(xpu and xpu.is_available())
+
+    @classmethod
+    def _get_xpu_device(cls) -> torch.device:
+        return torch.device("xpu")
+
+    @classmethod
     def choose_torch_device(cls) -> torch.device:
         """Return the torch.device to use for accelerated inference."""
         app_config = get_config()
@@ -54,6 +67,8 @@ class TorchDevice:
             device = torch.device(app_config.device)
         elif torch.cuda.is_available():
             device = CUDA_DEVICE
+        elif cls.is_xpu_available():
+            device = cls._get_xpu_device()
         elif torch.backends.mps.is_available():
             device = MPS_DEVICE
         else:
@@ -77,6 +92,14 @@ class TorchDevice:
                 # Use the user-defined precision
                 return cls._to_dtype(config.precision)
 
+        elif device.type == "xpu" and cls.is_xpu_available():
+            if config.precision == "auto":
+                # Default to float16 for XPU devices
+                return cls._to_dtype("float16")
+            else:
+                # Use the user-defined precision
+                return cls._to_dtype(config.precision)
+
         elif device.type == "mps" and torch.backends.mps.is_available():
             if config.precision == "auto":
                 # Default to float16 for MPS devices
@@ -91,7 +114,17 @@ class TorchDevice:
     def get_torch_device_name(cls) -> str:
         """Return the device name for the current torch device."""
         device = cls.choose_torch_device()
-        return torch.cuda.get_device_name(device) if device.type == "cuda" else device.type.upper()
+        if device.type == "cuda":
+            return torch.cuda.get_device_name(device)
+        if device.type == "xpu":
+            xpu = cls._get_xpu_module()
+            if xpu and hasattr(xpu, "get_device_name"):
+                try:
+                    return xpu.get_device_name(device)
+                except Exception:
+                    return "XPU"
+            return "XPU"
+        return device.type.upper()
 
     @classmethod
     def normalize(cls, device: Union[str, torch.device]) -> torch.device:
@@ -99,6 +132,10 @@ class TorchDevice:
         device = torch.device(device)
         if device.index is None and device.type == "cuda" and torch.cuda.is_available():
             device = torch.device(device.type, torch.cuda.current_device())
+        if device.index is None and device.type == "xpu" and cls.is_xpu_available():
+            xpu = cls._get_xpu_module()
+            if xpu and hasattr(xpu, "current_device"):
+                device = torch.device(device.type, xpu.current_device())
         return device
 
     @classmethod
@@ -106,6 +143,9 @@ class TorchDevice:
         """Clear the GPU device cache."""
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
+        xpu = cls._get_xpu_module()
+        if xpu and xpu.is_available() and hasattr(xpu, "empty_cache"):
+            xpu.empty_cache()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -132,8 +172,8 @@ class TorchDevice:
             # Test if bfloat16 is supported on this device
             torch.tensor([1.0], dtype=torch.bfloat16, device=device)
             return torch.bfloat16
-        except TypeError:
+        except (TypeError, RuntimeError):
             # bfloat16 not supported - fallback based on device type
-            if device.type == "cuda":
+            if device.type in {"cuda", "xpu"}:
                 return torch.float16
             return torch.float32

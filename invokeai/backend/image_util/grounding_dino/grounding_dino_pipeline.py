@@ -23,9 +23,9 @@ class GroundingDinoPipeline(RawModel):
         return results
 
     def to(self, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None):
-        # HACK(ryand): The GroundingDinoPipeline does not work on MPS devices. We only allow it to be moved to CPU or
-        # CUDA.
-        if device is not None and device.type not in {"cpu", "cuda"}:
+        # HACK(ryand): The GroundingDinoPipeline does not work on MPS devices. We only allow it to be moved to CPU, CUDA,
+        # or XPU.
+        if device is not None and device.type not in {"cpu", "cuda", "xpu"}:
             device = None
         self._pipeline.model.to(device=device, dtype=dtype)
         self._pipeline.device = self._pipeline.model.device

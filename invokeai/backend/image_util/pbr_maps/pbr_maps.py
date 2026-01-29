@@ -51,6 +51,10 @@ class PBRMapsGenerator:
         del state_dict
         if torch.cuda.is_available() and device.type == "cuda":
             torch.cuda.empty_cache()
+        elif device.type == "xpu":
+            xpu = getattr(torch, "xpu", None)
+            if xpu and xpu.is_available() and hasattr(xpu, "empty_cache"):
+                xpu.empty_cache()
 
         model.eval()
 

@@ -221,6 +221,12 @@ class StableDiffusionGeneratorPipeline(StableDiffusionPipeline):
             mem_free = psutil.virtual_memory().free
         elif self.unet.device.type == "cuda":
             mem_free, _ = torch.cuda.mem_get_info(TorchDevice.normalize(self.unet.device))
+        elif self.unet.device.type == "xpu":
+            xpu = getattr(torch, "xpu", None)
+            if xpu and xpu.is_available() and hasattr(xpu, "mem_get_info"):
+                mem_free, _ = xpu.mem_get_info(TorchDevice.normalize(self.unet.device))
+            else:
+                mem_free = psutil.virtual_memory().free
         else:
             raise ValueError(f"unrecognized device {self.unet.device}")
         # input tensor of [1, 4, h/8, w/8]

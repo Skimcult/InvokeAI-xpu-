@@ -25,8 +25,8 @@ class SegmentAnything2Pipeline(RawModel):
         self._sam2_processor = sam2_processor
 
     def to(self, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None):
-        # HACK: The SAM2 pipeline may not work on MPS devices. We only allow it to be moved to CPU or CUDA.
-        if device is not None and device.type not in {"cpu", "cuda"}:
+        # HACK: The SAM2 pipeline may not work on MPS devices. We only allow it to be moved to CPU, CUDA, or XPU.
+        if device is not None and device.type not in {"cpu", "cuda", "xpu"}:
             device = None
         self._sam2_model.to(device=device, dtype=dtype)
 
