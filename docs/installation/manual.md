@@ -140,6 +140,136 @@ The following commands vary depending on the version of Invoke being installed a
         invokeai-web --root $Home/invokeai
         ```
 
+## Intel XPU (Windows, experimental)
+
+Intel XPU support is experimental and requires a working oneAPI + Level Zero setup. This workflow installs a
+PyTorch XPU wheel and then installs InvokeAI from source without replacing torch. You will see dependency warnings
+about the torch version - this is expected.
+
+### Prerequisites
+
+- Intel oneAPI Base Toolkit (2025.x recommended)
+- Intel GPU drivers with Level Zero support
+- Node.js (for building the Web UI)
+
+### Steps (CMD)
+
+1. Clone the repo and create a venv:
+
+    ```bat
+    git clone https://github.com/invoke-ai/InvokeAI.git
+    cd InvokeAI
+    python -m venv .venv
+    .venv\Scripts\activate
+    ```
+
+2. Load oneAPI and verify the GPU is visible:
+
+    ```bat
+    call "C:\Program Files (x86)\Intel\oneAPI\2025.0\setvars.bat"
+    sycl-ls
+    ```
+
+3. Install PyTorch XPU and verify it:
+
+    ```bat
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/xpu
+    python -c "import torch; print(torch.__version__); print(torch.xpu.is_available())"
+    ```
+
+    If no matching wheels are found, try the nightly index:
+
+    ```bat
+    pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/xpu
+    ```
+
+4. Install InvokeAI from source without replacing torch, then pin numpy <2:
+
+    ```bat
+    pip install -e . --no-deps
+    pip install "numpy<2" --force-reinstall --no-deps
+    ```
+
+5. Install the remaining dependencies (excluding torch/torchvision):
+
+    ```bat
+    pip install ^
+      accelerate ^
+      blake3 ^
+      compel==2.1.1 ^
+      Deprecated ^
+      diffusers==0.36.0 ^
+      dnspython ^
+      dynamicprompts ^
+      einops ^
+      fastapi==0.118.3 ^
+      fastapi-events ^
+      gguf ^
+      huggingface-hub ^
+      mediapipe==0.10.14 ^
+      onnx==1.16.1 ^
+      onnxruntime==1.19.2 ^
+      opencv-contrib-python ^
+      picklescan ^
+      prompt-toolkit ^
+      pydantic ^
+      pydantic-settings ^
+      pypatchmatch ^
+      python-multipart ^
+      python-socketio ^
+      PyWavelets ^
+      requests ^
+      safetensors ^
+      semver~=3.0.1 ^
+      sentencepiece==0.2.0 ^
+      spandrel ^
+      torchsde ^
+      transformers>=4.56.0 ^
+      uvicorn[standard]
+    ```
+
+    Note: `bitsandbytes` is optional on Windows and often fails to install.
+
+6. Build the Web UI:
+
+    ```bat
+    npm install -g pnpm
+    set PYTHONPATH=%CD%
+    python scripts\generate_openapi_schema.py > invokeai\frontend\web\openapi.json
+    cd invokeai\frontend\web
+    pnpm typegen < openapi.json
+    pnpm vite build
+    cd ..\..\..
+    ```
+
+7. Create the config file and force XPU:
+
+    ```bat
+    notepad %USERPROFILE%\invokeai\invokeai.yaml
+    ```
+
+    Example config:
+
+    ```yaml
+    schema_version: 4.0.2
+    device: xpu
+    precision: float16
+    attention_type: torch-sdp
+    attention_slice_size: auto
+    enable_partial_loading: false
+    keep_ram_copy_of_weights: true
+    device_working_mem_gb: 2
+    force_tiled_decode: false
+    sequential_guidance: false
+    ```
+
+8. Run InvokeAI:
+
+    ```bat
+    set INVOKEAI_DEVICE=xpu
+    invokeai-web --root %USERPROFILE%\invokeai
+    ```
+
 ## Headless Install and Launch Scripts
 
 If you run Invoke on a headless server, you might want to install and run Invoke on the command line.
